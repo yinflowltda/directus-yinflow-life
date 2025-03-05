@@ -65,6 +65,9 @@ ENV \
 COPY --from=builder --chown=node:node /directus/ecosystem.config.cjs .
 COPY --from=builder --chown=node:node /directus/dist .
 
+# Adiciona o diretório das extensions para dentro da imagem docker
+COPY --from=builder --chown=node:node /directus/extensions extensions/
+
 EXPOSE 8055
 
 CMD : \
