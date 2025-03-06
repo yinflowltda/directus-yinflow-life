@@ -45,8 +45,8 @@ RUN <<EOF
 	mkdir -p database extensions uploads
 EOF
 
-####################################################################################################
-## Create Production Image
+###################################################################################################
+# Create Production Image
 
 FROM node:${NODE_VERSION}-alpine AS runtime
 
