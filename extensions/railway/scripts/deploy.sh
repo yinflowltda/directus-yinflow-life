@@ -24,9 +24,9 @@ if [ ! -d "$EXTENSIONS_PATH" ]; then
     fi
 else
     echo "Directory 'EXTENSIONS_PATH' already exists."
-    for dir in "$(pwd)"/extensions/*; do
+    for dir in "$(pwd)/extensions/*"; do
         if [ "$(basename $dir)" != "railway" ]; then
-            cp -r $dir "$EXTENSIONS_PATH/"
+            cp -Rv $dir "$EXTENSIONS_PATH/"
         fi
     done
 fi
