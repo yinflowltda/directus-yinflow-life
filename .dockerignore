@@ -9,3 +9,4 @@
 **/.env
 **/.cache
 !extensions/directus-extension-flow-manager/dist
+!extensions/migration-bundle/dist
