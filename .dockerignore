@@ -10,3 +10,4 @@
 **/.cache
 !extensions/directus-extension-flow-manager/dist
 !extensions/migration-bundle/dist
+!extensions/flow-trigger-bundle/dist
