@@ -75,3 +75,6 @@ CMD : \
 	&& node cli.js bootstrap \
 	&& pm2-runtime start ecosystem.config.cjs \
 	;
+
+RUN npm install -g pnpm@9
+
