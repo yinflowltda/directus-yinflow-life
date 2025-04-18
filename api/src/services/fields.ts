@@ -31,6 +31,9 @@ import { getSchema } from '../utils/get-schema.js';
 import { sanitizeColumn } from '../utils/sanitize-schema.js';
 import { shouldClearCache } from '../utils/should-clear-cache.js';
 import { transaction } from '../utils/transaction.js';
+import { buildCollectionAndFieldRelations } from './fields/build-collection-and-field-relations.js';
+import { getCollectionMetaUpdates } from './fields/get-collection-meta-updates.js';
+import { getCollectionRelationList } from './fields/get-collection-relation-list.js';
 import { ItemsService } from './items.js';
 import { PayloadService } from './payload.js';
 import { RelationsService } from './relations.js';
@@ -81,7 +84,7 @@ export class FieldsService {
 			columnInfo = await this.schemaInspector.columnInfo();
 
 			if (schemaCacheIsEnabled) {
-				setCacheValue(this.schemaCache, 'columnInfo', columnInfo);
+				await setCacheValue(this.schemaCache, 'columnInfo', columnInfo);
 			}
 		}
 
@@ -730,24 +733,36 @@ export class FieldsService {
 					});
 				}
 
-				const collectionMeta = await trx
-					.select('archive_field', 'sort_field')
+				const { collectionRelationTree, fieldToCollectionList } = await buildCollectionAndFieldRelations(
+					this.schema.relations,
+				);
+
+				const collectionRelationList = getCollectionRelationList(collection, collectionRelationTree);
+
+				const collectionMetaQuery = trx
+					.queryBuilder()
+					.select('collection', 'archive_field', 'sort_field', 'item_duplication_fields')
 					.from('directus_collections')
-					.where({ collection })
-					.first();
+					.where({ collection });
 
-				const collectionMetaUpdates: Record<string, null> = {};
-
-				if (collectionMeta?.archive_field === field) {
-					collectionMetaUpdates['archive_field'] = null;
+				if (collectionRelationList.size !== 0) {
+					collectionMetaQuery.orWhere(function () {
+						this.whereIn('collection', Array.from(collectionRelationList)).whereNotNull('item_duplication_fields');
+					});
 				}
 
-				if (collectionMeta?.sort_field === field) {
-					collectionMetaUpdates['sort_field'] = null;
-				}
+				const collectionMetas = await collectionMetaQuery;
 
-				if (Object.keys(collectionMetaUpdates).length > 0) {
-					await trx('directus_collections').update(collectionMetaUpdates).where({ collection });
+				const collectionMetaUpdates = getCollectionMetaUpdates(
+					collection,
+					field,
+					collectionMetas,
+					this.schema.collections,
+					fieldToCollectionList,
+				);
+
+				for (const meta of collectionMetaUpdates) {
+					await trx('directus_collections').update(meta.updates).where({ collection: meta.collection });
 				}
 
 				// Cleanup directus_fields
@@ -866,7 +881,21 @@ export class FieldsService {
 			throw new InvalidPayloadError({ reason: `Illegal type passed: "${field.type}"` });
 		}
 
-		const setDefaultValue = (defaultValue: string | number | boolean | null) => {
+		/**
+		 * The column nullability must be set on every alter or it will be dropped
+		 * This is due to column.alter() not being incremental per https://knexjs.org/guide/schema-builder.html#alter
+		 */
+		this.helpers.schema.setNullable(column, field, existing);
+
+		/**
+		 * The default value must be set on every alter or it will be dropped
+		 * This is due to column.alter() not being incremental per https://knexjs.org/guide/schema-builder.html#alter
+		 */
+
+		const defaultValue =
+			field.schema?.default_value !== undefined ? field.schema?.default_value : existing?.default_value;
+
+		if (defaultValue !== undefined) {
 			const newDefaultValueIsString = typeof defaultValue === 'string';
 			const newDefaultIsNowFunction = newDefaultValueIsString && defaultValue.toLowerCase() === 'now()';
 			const newDefaultIsCurrentTimestamp = newDefaultValueIsString && defaultValue === 'CURRENT_TIMESTAMP';
@@ -886,62 +915,30 @@ export class FieldsService {
 			} else {
 				column.defaultTo(defaultValue);
 			}
-		};
-
-		// for a new item, set the default value and nullable as provided without any further considerations
-		if (!existing) {
-			if (field.schema?.default_value !== undefined) {
-				setDefaultValue(field.schema.default_value);
-			}
-
-			if (field.schema?.is_nullable || field.schema?.is_nullable === undefined) {
-				column.nullable();
-			} else {
-				column.notNullable();
-			}
-		} else {
-			// for an existing item: if nullable option changed, we have to provide the default values as well and actually vice versa
-			// see https://knexjs.org/guide/schema-builder.html#alter
-			// To overwrite a nullable option with the same value this is not possible for Oracle though, hence the DB helper
-
-			if (field.schema?.default_value !== undefined || field.schema?.is_nullable !== undefined) {
-				this.helpers.nullableUpdate.updateNullableValue(column, field, existing);
-
-				let defaultValue = null;
-
-				if (field.schema?.default_value !== undefined) {
-					defaultValue = field.schema.default_value;
-				} else if (existing.default_value !== undefined) {
-					defaultValue = existing.default_value;
-				}
-
-				setDefaultValue(defaultValue);
-			}
 		}
 
 		if (field.schema?.is_primary_key) {
 			column.primary().notNullable();
 		} else if (!existing?.is_primary_key) {
 			// primary key will already have unique/index constraints
-
-			const uniqueIndexName = this.helpers.schema.generateIndexName('unique', collection, field.field);
-
 			if (field.schema?.is_unique === true) {
 				if (!existing || existing.is_unique === false) {
-					column.unique({ indexName: uniqueIndexName });
+					column.unique({ indexName: this.helpers.schema.generateIndexName('unique', collection, field.field) });
 				}
 			} else if (field.schema?.is_unique === false) {
-				if (existing && existing.is_unique === true) {
-					table.dropUnique([field.field], uniqueIndexName);
+				if (existing?.is_unique === true) {
+					table.dropUnique([field.field], this.helpers.schema.generateIndexName('unique', collection, field.field));
 				}
 			}
 
-			const indexName: string = this.helpers.schema.generateIndexName('index', collection, field.field);
-
-			if (field.schema?.is_indexed === true && !existing?.is_indexed) {
-				column.index(indexName);
-			} else if (field.schema?.is_indexed === false && existing?.is_indexed) {
-				table.dropIndex([field.field], indexName);
+			if (field.schema?.is_indexed === true) {
+				if (!existing || existing.is_indexed === false) {
+					column.index(this.helpers.schema.generateIndexName('index', collection, field.field));
+				}
+			} else if (field.schema?.is_indexed === false) {
+				if (existing?.is_indexed === true) {
+					table.dropIndex([field.field], this.helpers.schema.generateIndexName('index', collection, field.field));
+				}
 			}
 		}
 

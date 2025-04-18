@@ -1,5 +1,6 @@
 import type { KNEX_TYPES } from '@directus/constants';
-import type { Field, Relation, Type } from '@directus/types';
+import type { Column } from '@directus/schema';
+import type { Field, RawField, Relation, Type } from '@directus/types';
 import type { Knex } from 'knex';
 import type { DatabaseClient } from '../../../types/index.js';
 import { getDefaultIndexName } from '../../../utils/get-default-index-name.js';
@@ -111,6 +112,16 @@ export abstract class SchemaHelper extends DatabaseHelper {
 		return;
 	}
 
+	setNullable(column: Knex.ColumnBuilder, field: RawField | Field, existing: Column | null): void {
+		const isNullable = field.schema?.is_nullable ?? existing?.is_nullable ?? true;
+
+		if (isNullable) {
+			column.nullable();
+		} else {
+			column.notNullable();
+		}
+	}
+
 	processFieldType(field: Field): Type {
 		return field.type;
 	}
@@ -133,22 +144,6 @@ export abstract class SchemaHelper extends DatabaseHelper {
 
 	castA2oPrimaryKey(): string {
 		return 'CAST(?? AS CHAR(255))';
-	}
-
-	applyMultiRelationalSort(
-		knex: Knex,
-		dbQuery: Knex.QueryBuilder,
-		table: string,
-		primaryKey: string,
-		orderByString: string,
-		orderByFields: Knex.Raw[],
-	): Knex.QueryBuilder {
-		dbQuery.rowNumber(
-			knex.ref('directus_row_number').toQuery(),
-			knex.raw(`partition by ?? order by ${orderByString}`, [`${table}.${primaryKey}`, ...orderByFields]),
-		);
-
-		return dbQuery;
 	}
 
 	formatUUID(uuid: string): string {

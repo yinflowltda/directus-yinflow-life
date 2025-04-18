@@ -4,8 +4,7 @@ import type { Knex } from 'knex';
 import { cloneDeep } from 'lodash-es';
 import type { Context } from '../../../permissions/types.js';
 import type { FieldNode, FunctionFieldNode, O2MNode } from '../../../types/ast.js';
-import type { ColumnSortRecord } from '../../../utils/apply-query.js';
-import applyQuery, { applyLimit, applySort, generateAlias } from '../../../utils/apply-query.js';
+import { applySort, type ColumnSortRecord } from './apply-query/sort.js';
 import { getCollectionFromAlias } from '../../../utils/get-collection-from-alias.js';
 import type { AliasMap } from '../../../utils/get-column-path.js';
 import { getColumn } from '../../../utils/get-column.js';
@@ -15,6 +14,8 @@ import { getColumnPreprocessor } from '../utils/get-column-pre-processor.js';
 import { getNodeAlias } from '../utils/get-field-alias.js';
 import { getInnerQueryColumnPreProcessor } from '../utils/get-inner-query-column-pre-processor.js';
 import { withPreprocessBindings } from '../utils/with-preprocess-bindings.js';
+import applyQuery, { generateAlias } from './apply-query/index.js';
+import { applyLimit } from './apply-query/pagination.js';
 
 export type DBQueryOptions = {
 	table: string;
@@ -46,25 +47,48 @@ export function getDBQuery(
 	if (queryCopy.aggregate || queryCopy.group) {
 		const flatQuery = knex.from(table);
 
+		const fieldNodeMap = Object.fromEntries(
+			fieldNodes.map((node, index): [string, [FieldNode | FunctionFieldNode, number]] => [
+				node.fieldKey,
+				[node, index],
+			]),
+		);
+
+		const groupFieldNodes = queryCopy.group?.map((field) => fieldNodeMap[field]![0]) ?? [];
+
 		// Map the group fields to their respective field nodes
-		const groupWhenCases = hasCaseWhen
-			? queryCopy.group?.map((field) => fieldNodes.find(({ fieldKey }) => fieldKey === field)?.whenCase ?? [])
-			: undefined;
+		const groupWhenCases = hasCaseWhen ? groupFieldNodes.map((node) => node.whenCase ?? []) : undefined;
+
+		// Determine the number of aggregates that will be selected
+		const aggregateCount = Object.entries(queryCopy.aggregate ?? {}).reduce(
+			(acc, [_, fields]) => acc + fields.length,
+			0,
+		);
+
+		// Map the group field to their respective select column positions (1 based, offset by the number of aggregate terms that are applied in applyQuery)
+		// The positions need to be offset by the number of aggregate terms, since the aggregate terms are selected first
+		const groupColumnPositions = queryCopy.group?.map((field) => fieldNodeMap[field]![1] + 1 + aggregateCount) ?? [];
 
 		const dbQuery = applyQuery(knex, table, flatQuery, queryCopy, schema, cases, permissions, {
 			aliasMap,
 			groupWhenCases,
+			groupColumnPositions,
 		}).query;
 
 		flatQuery.select(fieldNodes.map((node) => preProcess(node)));
 
-		withPreprocessBindings(knex, dbQuery);
+		if (
+			helpers.capabilities.supportsDeduplicationOfParameters() &&
+			!helpers.capabilities.supportsColumnPositionInGroupBy()
+		) {
+			withPreprocessBindings(knex, dbQuery);
+		}
 
 		return dbQuery;
 	}
 
 	const primaryKey = schema.collections[table]!.primary;
-	let dbQuery = knex.from(table);
+	const dbQuery = knex.from(table);
 	let sortRecords: ColumnSortRecord[] | undefined;
 	const innerQuerySortRecords: { alias: string; order: 'asc' | 'desc'; column: Knex.Raw }[] = [];
 	let hasMultiRelationalSort: boolean | undefined;
@@ -152,13 +176,9 @@ export function getDBQuery(
 			});
 
 			if (hasMultiRelationalSort) {
-				dbQuery = helpers.schema.applyMultiRelationalSort(
-					knex,
-					dbQuery,
-					table,
-					primaryKey,
-					orderByString,
-					orderByFields,
+				dbQuery.rowNumber(
+					knex.ref('directus_row_number').toQuery(),
+					knex.raw(`partition by ?? order by ${orderByString}`, [`${table}.${primaryKey}`, ...orderByFields]),
 				);
 
 				// Start order by with directus_row_number. The directus_row_number is derived from a window function that
@@ -204,7 +224,7 @@ export function getDBQuery(
 		   So instead of having an inner query which might look like this:
 
 		   SELECT DISTINCT ...,
-		     CASE WHEN <condition> THEN <actual-column> END AS <alias>
+			 CASE WHEN <condition> THEN <actual-column> END AS <alias>
 
 		   a group-by query is generated.
 
@@ -216,14 +236,14 @@ export function getDBQuery(
 		   the actual column:
 
 		   SELECT ...,
-		     COUNT (CASE WHEN <condition> THEN 1 END) AS <random-prefix>_<alias>
-		     ...
-		     GROUP BY <primary-key>
+			 COUNT (CASE WHEN <condition> THEN 1 END) AS <random-prefix>_<alias>
+			 ...
+			 GROUP BY <primary-key>
 
-		    Then, in the wrapper query there is no need to evaluate the condition again, but instead rely on the flag:
+			Then, in the wrapper query there is no need to evaluate the condition again, but instead rely on the flag:
 
-		    SELECT ...,
-		      CASE WHEN `inner`.<random-prefix>_<alias> > 0 THEN <actual-column> END AS <alias>
+			SELECT ...,
+			  CASE WHEN `inner`.<random-prefix>_<alias> > 0 THEN <actual-column> END AS <alias>
 		 */
 
 		const innerPreprocess = getInnerQueryColumnPreProcessor(

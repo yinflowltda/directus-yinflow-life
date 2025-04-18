@@ -124,7 +124,7 @@ export default defineTheme({
 			background: 'var(--theme--background)',
 			borderColor: 'transparent',
 			borderWidth: '0px',
-			boxShadow: '0 4px 7px -4px rgb(var(--black) / 0.2)',
+			boxShadow: '0 4px 7px -4px black',
 			headline: {
 				foreground: 'var(--theme--foreground-subdued)',
 				fontFamily: 'var(--theme--fonts--sans--font-family)',
@@ -273,7 +273,7 @@ export default defineTheme({
 			menu: {
 				background: '#161b22',
 				borderRadius: 'var(--theme--border-radius)',
-				boxShadow: '0px 0px 6px 0px rgb(0, 0, 0, 0.2)',
+				boxShadow: '0px 0px 6px 0px black',
 			},
 		},
 
